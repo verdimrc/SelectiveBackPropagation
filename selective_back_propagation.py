@@ -1,14 +1,24 @@
-import collections
+from collections import deque
+
+# from loguru import logger
+from typing import Any, Callable
 
 import numpy as np
 import torch
-# from loguru import logger
+from nptyping import NDArray
+from torchtyping import TensorType, patch_typeguard
+from typeguard import typechecked
+
+patch_typeguard()
+
+batch_size = int
 
 
 class SelectiveBackPropagation:
     """
-    Selective_Backpropagation from paper Accelerating Deep Learning by Focusing on the Biggest Losers
-    https://arxiv.org/abs/1910.00762v1
+    Selective_Backpropagation from paper Accelerating Deep Learning by Focusing on the Biggest
+    Losers https://arxiv.org/abs/1910.00762v1
+
     Without:
             ...
             criterion = nn.CrossEntropyLoss(reduction='none')
@@ -19,6 +29,7 @@ class SelectiveBackPropagation:
                 loss = criterion(y_pred, y).mean()
                 loss.backward()
                 ...
+
     With:
             ...
             criterion = nn.CrossEntropyLoss(reduction='none')
@@ -39,8 +50,17 @@ class SelectiveBackPropagation:
                 selective_backprop.selective_back_propagation(not_reduced_loss, x, y)
                 ...
     """
-    def __init__(self, compute_losses_func, update_weights_func, optimizer, model,
-                 batch_size, epoch_length, loss_selection_threshold=False):
+
+    def __init__(
+        self,
+        compute_losses_func: Callable,
+        update_weights_func: Callable,
+        optimizer: Callable,
+        model: torch.nn.Module,
+        batch_size: int,
+        epoch_length: int,
+        loss_selection_threshold: bool = False,
+    ) -> None:
         """
         Usage:
         ```
@@ -55,18 +75,19 @@ class SelectiveBackPropagation:
                                     loss_selection_threshold=False)
         ```
 
-        :param compute_losses_func: the loss function which output a tensor of dim [batch_size] (no reduction to apply).
-        Example: `compute_losses_func = nn.CrossEntropyLoss(reduction='none')`
-        :param update_weights_func: the reduction of the loss and backpropagation. Example: `update_weights_func =
-        lambda loss : loss.mean().backward()`
+        :param compute_losses_func: the loss function which output a tensor of dim [batch_size] (no
+            reduction to apply).
+            Example: `compute_losses_func = nn.CrossEntropyLoss(reduction='none')`.
+        :param update_weights_func: the reduction of the loss and backpropagation.
+            Example: `update_weights_func = lambda loss : loss.mean().backward()`
         :param optimizer: your optimizer object
         :param model: your model object
         :param batch_size: number of images per batch
         :param epoch_length: the number of batch per epoch
-        :param loss_selection_threshold: default to False. Set to a float value to select all images with with loss
-        higher than loss_selection_threshold. Do not change behavior for loss below loss_selection_threshold.
+        :param loss_selection_threshold: default to False. Set to a float value to select all images
+            with with loss higher than loss_selection_threshold. Do not change behavior for loss
+            below loss_selection_threshold.
         """
-
         self.loss_selection_threshold = loss_selection_threshold
         self.compute_losses_func = compute_losses_func
         self.update_weights_func = update_weights_func
@@ -74,10 +95,20 @@ class SelectiveBackPropagation:
         self.optimizer = optimizer
         self.model = model
 
-        self.loss_hist = collections.deque([], maxlen=batch_size*epoch_length)
-        self.selected_inputs, self.selected_targets = [], []
+        self.loss_hist: deque[float] = deque([], maxlen=batch_size * epoch_length)
 
-    def selective_back_propagation(self, loss_per_img, data, targets):
+        # Given a minibatch tensor[batch_size, ...], track some of the batch member (i.e.,
+        # tensor[...]) in a list.
+        self.selected_inputs: list[TensorType[...]] = []
+        self.selected_targets: list[TensorType[...]] = []
+
+    @typechecked
+    def selective_back_propagation(
+        self,
+        loss_per_img: TensorType[batch_size],
+        data: TensorType[batch_size, ...],
+        targets: TensorType[batch_size, ...],
+    ) -> TensorType[(), float]:
         effective_batch_loss = None
 
         cpu_losses = loss_per_img.detach().clone().cpu()
@@ -100,8 +131,9 @@ class SelectiveBackPropagation:
             if len(self.selected_targets) == self.batch_size:
                 self.model.train()
                 predictions = self.model(torch.stack(self.selected_inputs))
-                effective_batch_loss = self.compute_losses_func(predictions,
-                                                                torch.stack(self.selected_targets))
+                effective_batch_loss = self.compute_losses_func(
+                    predictions, torch.stack(self.selected_targets)
+                )
                 self.update_weights_func(effective_batch_loss)
                 effective_batch_loss = effective_batch_loss.mean()
                 self.model.eval()
@@ -114,12 +146,16 @@ class SelectiveBackPropagation:
         # logger.info("Mean of effective_batch_loss {}".format(effective_batch_loss))
         return effective_batch_loss
 
-    def _get_selection_probabilities(self, loss):
+    def _get_selection_probabilities(self, loss: NDArray[Any]) -> NDArray[Any]:
         percentiles = self._percentiles(self.loss_hist, loss)
         return percentiles ** 2
 
-    def _percentiles(self, hist_values, values_to_search):
-        # TODO Speed up this again. There is still a visible overhead in training. 
+    def _percentiles(
+        self,
+        hist_values: deque[Any],
+        values_to_search: NDArray[Any],
+    ) -> NDArray[Any]:
+        # TODO Speed up this again. There is still a visible overhead in training.
         hist_values, values_to_search = np.asarray(hist_values), np.asarray(values_to_search)
 
         percentiles_values = np.percentile(hist_values, range(100))
@@ -130,6 +166,8 @@ class SelectiveBackPropagation:
             while values_to_search[sorted_loss_idx[counter]] < percentiles_value:
                 percentiles_by_loss[sorted_loss_idx[counter]] = idx
                 counter += 1
-                if counter == len(values_to_search) : break
-            if counter == len(values_to_search) : break
-        return np.array(percentiles_by_loss)/100
+                if counter == len(values_to_search):
+                    break
+            if counter == len(values_to_search):
+                break
+        return np.array(percentiles_by_loss) / 100
